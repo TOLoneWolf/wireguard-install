@@ -75,25 +75,42 @@ function getHomeDirForClient() {
 		exit 1
 	fi
 
-	# Home directory of the user, where the client configuration will be written
-	if [ -e "/home/${CLIENT_NAME}" ]; then
-		# if $1 is a user name
-		HOME_DIR="/home/${CLIENT_NAME}"
-	elif [ "${SUDO_USER}" ]; then
-		# if not, use SUDO_USER
-		if [ "${SUDO_USER}" == "root" ]; then
-			# If running sudo as root
-			HOME_DIR="/root"
-		else
-			HOME_DIR="/home/${SUDO_USER}"
-		fi
-	else
-		# if not SUDO_USER, use /root
-		HOME_DIR="/root"
-	fi
+	# # Home directory of the user, where the client configuration will be written
+	# if [ -e "/home/${CLIENT_NAME}" ]; then
+	# 	# if $1 is a user name
+	# 	HOME_DIR="/home/${CLIENT_NAME}"
+	# elif [ "${SUDO_USER}" ]; then
+	# 	# if not, use SUDO_USER
+	# 	if [ "${SUDO_USER}" == "root" ]; then
+	# 		# If running sudo as root
+	# 		HOME_DIR="/root"
+	# 	else
+	# 		HOME_DIR="/home/${SUDO_USER}"
+	# 	fi
+	# else
+	# 	# if not SUDO_USER, use /root
+	# 	HOME_DIR="/root"
+	# fi
 
+	HOME_DIR="/etc/wireguard/clients/"
 	echo "$HOME_DIR"
 }
+
+function isPrivateIP() {
+  local IP=$1
+
+  # Check if the IP address is within private IPv4 cidr ranges
+  if [[ $IP =~ ^10\. || $IP =~ ^192\.168\. || $IP =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+    return 0
+  fi
+
+  # Check if the IP address is within private IPv6 cidr ranges
+  if [[ $IP =~ ^fd[0-9a-f:]* ]]; then
+    return 0
+  fi
+  return 1
+}
+
 
 function initialCheck() {
 	isRoot
@@ -115,7 +132,13 @@ function installQuestions() {
 		# Detect public IPv6 address
 		SERVER_PUB_IP=$(ip -6 addr | sed -ne 's|^.* inet6 \([^/]*\)/.* scope global.*$|\1|p' | head -1)
 	fi
-	read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+
+	# Check if the detected public IP address is in a private CIDR block
+	if isPrivateIP "${SERVER_PUB_IP}"; then
+		read -rp "Detected private IP address (${SERVER_PUB_IP}) appears to be in a private CIDR block. Please enter the public address for the endpoint: " -e SERVER_PUB_IP
+	else
+		read -rp "IPv4 or IPv6 public address: " -e -i "${SERVER_PUB_IP}" SERVER_PUB_IP
+	fi
 
 	# Detect public interface and pre-fill for the user
 	SERVER_NIC="$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)"
@@ -132,16 +155,19 @@ function installQuestions() {
 	done
 
 	until [[ ${SERVER_WG_IPV6} =~ ^([a-f0-9]{1,4}:){3,4}: ]]; do
-		read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
+		DEFAULT_IPV6=$(echo "`date +%s%N``cat /etc/machine-id`" | sha256sum | cut -c 55-65 | sed 's/../&\n/g' | xargs printf "fd%s:%s%s:%s%s::1")
+		read -rp "Server WireGuard IPv6: " -e -i "${DEFAULT_IPV6}" SERVER_WG_IPV6
+		# read -rp "Server WireGuard IPv6: " -e -i fd42:42:42::1 SERVER_WG_IPV6
 	done
 
+	echo "Default wireguard port is 51820."
 	# Generate random number within private ports range
 	RANDOM_PORT=$(shuf -i49152-65535 -n1)
 	until [[ ${SERVER_PORT} =~ ^[0-9]+$ ]] && [ "${SERVER_PORT}" -ge 1 ] && [ "${SERVER_PORT}" -le 65535 ]; do
 		read -rp "Server WireGuard port [1-65535]: " -e -i "${RANDOM_PORT}" SERVER_PORT
 	done
 
-	# Adguard DNS by default
+	# Cloudflare DNS by default
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
 		read -rp "First DNS resolver to use for the clients: " -e -i 1.1.1.1 CLIENT_DNS_1
 	done
@@ -355,6 +381,7 @@ function newClient() {
 	# Create client file and add the server as a peer
 	echo "[Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
+### ClientPublicKey = ${CLIENT_PUB_KEY}
 Address = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
 DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}
 
